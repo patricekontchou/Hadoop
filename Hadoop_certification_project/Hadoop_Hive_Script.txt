@@ -1,0 +1,218 @@
+--Final Report Hive Script
+
+--Create external table for all files so that if tables are drop files are not deleted.
+--Create table for PlanInfoCounty file 
+
+CREATE EXTERNAL TABLE PlanInfoCounty_PK
+(contact_id VARCHAR(20), plan_id INT,
+segment_id INT, contract_year VARCHAR(30),
+org_name STRING, plan_name VARCHAR(30),
+zip_code VARCHAR(8),CountyFIPSCode VARCHAR(8))
+COMMENT 'This is a PlanInfoCounty table'
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION '/user/hduser/pat_hdfs/';
+
+--Load Data in the table
+
+LOAD DATA INPATH 'pat_hdfs/PlanInfoCountyFinal_copy_2.txt' INTO TABLE PlanInfoCounty_PK;
+ 
+--Create table for PlanService file---
+
+CREATE EXTERNAL TABLE PlanService_2
+(Language STRING ,contact_Year VARCHAR(30) ,contract_id VARCHAR(20),plan_ID INT,segment_id INT, category_description STRING,
+category_code INT,benefit VARCHAR(5000), package_name STRING,package_id STRING,sentences_sort_order INT
+COMMENT 'This is a PlanService table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/planservices_2';
+
+--Load data 
+
+LOAD DATA INPATH '/user/hduser/pat_hdfs/result/PlanServices_pk1.txt' INTO TABLE planServices_2;
+
+---View sample data in the table-----
+ SELECT language,contact_year,contract_id,plan_id,segment_id,category_description,category_code,benefit,package_name,package_id,sentences_sort_order FROM Planservice where language = 'English' LIMIT 10;
+
+-----CREATE copay intermediate TABLE copay_pk_i
+CREATE EXTERNAL TABLE copay_pk_i                      -- category_code = 10
+(contact_Year VARCHAR(30) ,contract_id VARCHAR(20),plan_ID INT,segment_id INT,payment_type STRING, physician_type STRING, physician_in_out STRING, copay_amount DECIMAL,co_ins_amount DECIMAL 
+COMMENT 'This is a copay per doctor table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/copay_pk_i';  
+
+--LOAD DATA 
+
+SELECT contact_year,contract_id,plan_id,segment_id,regexp_extract(benefit,'copay',0),regexp_extract(benefit,'(Primary|Specialist)',0),regexp_extract(benefit,'(In-network|Out-of-network)',0),regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1),regexp_extract(benefit, '<[a-z]>(.*)(%)</[a-z]>',1), benefit FROM planservice_2 WHERE category_code = 10 LIMIT 500;
+
+INSERT INTO TABLE copay_pk_i SELECT contact_year,contract_id,plan_id,segment_id,regexp_extract(benefit,'copay',0),regexp_extract(benefit,'(Primary|Specialist)',0),regexp_extract(benefit,'(In-network|Out-of-network)',0),regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1),regexp_extract(benefit, '<[a-z]>(.*)(%)</[a-z]>',1) FROM planservice_2 WHERE category_code = 10;
+
+--Check for bad data and correct-----
+SELECT * FROM copay_pk_i WHERE payment_type = '';
+
+
+--CREATE final copay table  'copay_pk_f' table data with intermediate data from copay_pk_i
+
+CREATE EXTERNAL TABLE copay_pk_f                       
+(contact_Year VARCHAR(30) ,contract_id VARCHAR(20),plan_ID INT,segment_id INT,payment_type STRING, physician_type STRING, physician_in_out STRING, copay_amount DECIMAL,co_ins_amount DECIMAL
+COMMENT 'This is a copay per doctor table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/copay_pk_final'; 
+
+--LOAD DATA 
+
+case 1. add 'co_insurance' into field payment_type where it is null and collect all payment where copay or co_insurance is not null;
+INSERT INTO TABLE copay_pk_f SELECT contact_year,contract_id,plan_id,segment_id,CASE WHEN payment_type = '' THEN 'co_insurance' ELSE payment_type END,physician_type,Case WHEN physician_in_out = '' THEN 'NA' ELSE physician_in_out END,copay_amount,co_ins_amount FROM copay_pk_i where payment_type = '' AND ( copay_amount IS NOT NULL OR co_ins_amount IS NOT NULL);
+
+case 2. add 'copay' into field payment_type where is null and collect all payment where copay and co_insurance is  null: patient pays nothing per doctor's visit;
+INSERT INTO TABLE copay_pk_f SELECT contact_year,contract_id,plan_id,segment_id, Case WHEN payment_type='' THEN 'copay' ELSE payment_type END,physician_type,Case WHEN physician_in_out = '' THEN 'NA' ELSE physician_in_out END,Case when copay_amount IS NULL THEN 0 ELSE copay_amount END,Case when co_ins_amount IS NULL THEN 0 ELSE co_ins_amount END FROM copay_pk_i where copay_amount IS NULL AND co_ins_amount IS NULL;
+
+--Create premium data table---  
+
+CREATE EXTERNAL TABLE premium_pk_f     
+(contact_Year VARCHAR(30) ,contract_id VARCHAR(20),plan_ID INT,segment_id INT, premium DECIMAL
+COMMENT 'This is a copay per doctor table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/premium_pk_f';
+
+--LOad DATA
+--Check data integrity of premium data in planservice table
+
+SELECT contact_year,contract_id,plan_id,segment_id,regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1),benefit FROM planservice_2 WHERE category_code = 1  and  sentences_sort_order = 1 AND regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1);
+SELECT contact_year,contract_id,plan_id,segment_id,CAST(regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1)AS DECIMAL),benefit FROM planservice_2 WHERE category_code = 1  and  sentences_sort_order = 1 AND CAST(regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1)AS DECIMAL) IS NULL;
+
+--INSERT TABLE Premium -------
+INSERT INTO TABLE premium_pk SELECT contact_year,contract_id,plan_id,segment_id,regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1) FROM planservice_2 WHERE category_code = 1  and  sentences_sort_order = 1;
+
+----Correct premium table and put 0 everywhere you have <pay_nothing> or IS NULL 
+INSERT INTO TABLE premium_pk_f SELECT contact_year,contract_id,plan_id,segment_id,CASE WHEN premium IS NULL THEN 0 ELSE premium END FROM premium_pk;
+
+
+--create an intermediate table to get raw data from from planservice_2-----
+ 
+CREATE EXTERNAL TABLE ambulance_service_pk_i      
+(contact_Year VARCHAR(30),contract_id VARCHAR(20),plan_ID INT,segment_id INT,co_insurance STRING,in_out_network STRING, ambulance_cost DECIMAL,per_amount DECIMAL,pay_nothing STRING 
+COMMENT 'This is a copay per ambulance service table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/ambulance_service_pk_i';
+
+--check data integrity. ambulance service have category_code = 5---
+SELECT contact_year,contract_id,plan_id,segment_id,regexp_extract(benefit,'copay',0),regexp_extract(benefit,'(In-network|Out-of-network)',0),regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1),regexp_extract(benefit, '<[a-z]>(.*)(%)</[a-z]>',1), benefit FROM planservice_2 WHERE category_code = 5 LIMIT 100;
+
+--LOAD DATA
+
+INSERT INTO TABLE ambulance_service_pk_i SELECT contact_year,contract_id,plan_id,segment_id,regexp_extract(benefit,'copay',0),regexp_extract(benefit,'(In-network|Out-of-network)',0),regexp_extract(benefit, '<[a-z]>[$](.*)</[a-z]>',1),regexp_extract(benefit, '<[a-z]>(.*)(%)</[a-z]>',1),regexp_extract(benefit,'(In-network|Out-of-network)',0) FROM planservice_2 WHERE category_code = 5;
+
+--CREATE the final ambulance service table data with intermediate data from ambulance_service_pk_i
+
+CREATE EXTERNAL TABLE ambulance_service_pk        
+(contact_Year VARCHAR(30),contract_id VARCHAR(20),plan_ID INT,segment_id INT,co_insurance STRING,in_out_network STRING, ambulance_cost DECIMAL,per_amount DECIMAL 
+COMMENT 'This is a copay per ambulance service table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/ambulance_service_pk';
+
+--INSERT data into the final table while applying correction-- 
+--Case 1. Everywhere where it says <pay_nothing> set to 0 ------
+INSERT INTO TABLE ambulance_service_pk SELECT contact_Year,contract_id,plan_ID,segment_id,CASE WHEN co_insurance ='' THEN 'co_insurance' ELSE co_insurance END,CASE WHEN in_out_network = '' THEN 'NA' ELSE in_out_network END, CASE WHEN ambulance_cost IS NULL THEN 0 ELSE ambulance_cost END ,CASE WHEN per_amount IS NULL THEN 0 ELSE per_amount END FROM ambulance_service_pk_i WHERE ambulance_cost IS NULL AND per_amount IS NULL and pay_nothing <> '';
+
+--Case 2. Everywhere where it does not say <pay_nothing> set to its value extract using regexp_extract----- 
+INSERT INTO TABLE ambulance_service_pk SELECT contact_Year,contract_id,plan_ID,segment_id,CASE WHEN co_insurance ='' THEN 'co_insurance' ELSE co_insurance END,CASE WHEN in_out_network = '' THEN 'NA' ELSE in_out_network END, CASE WHEN ambulance_cost IS NULL THEN 0 ELSE ambulance_cost END ,CASE WHEN per_amount IS NULL THEN 0 ELSE per_amount END FROM ambulance_service_pk_i WHERE pay_nothing = '';
+
+--create list of diabetes services. diabetes services have category_code = 8  -- just getting the description on each plan and user will read and compare
+
+CREATE EXTERNAL TABLE diabetes_service_pk           
+(contact_Year VARCHAR(30) ,contract_id VARCHAR(20),plan_ID INT,segment_id INT,  d_service_benefit VARCHAR(5000)   
+COMMENT 'This is a copay per ambulance service table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/diabetes_service_pk';
+
+--INSERT TABLE script--
+INSERT INTO TABLE diabetes_service_pk SELECT DISTINCT contact_year,contract_id,plan_id,segment_id,regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(benefit,'\&nbsp\;',''),'<b>',''),'</b>',''),'<ul>',''),'</ul>',''),'<li>',''),'</li>',''),'<br />','') FROM planservice_2 WHERE category_code = 8;
+ 
+ 
+--create list of diabetes and mental health issue services. diabetes services have category_code = 8 and mental health issue category_code = 16 -- just getting the description on each plan and user will read and compare
+
+CREATE EXTERNAL TABLE d_m_benefit_pk           
+(contact_Year VARCHAR(30) ,contract_id VARCHAR(20),plan_ID INT,segment_id INT, category_description VARCHAR(500),d_m_benefit VARCHAR(5000)   
+COMMENT 'This is a copay per ambulance service table')
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE 
+LOCATION 'hdfs://ip-10-0-0-28.ec2.internal:8020/user/hduser/pat_hdfs/dm_benefit_pk';
+
+--INSERT TABLE script--
+--INSERT INTO TABLE d_m_benefit_pk SELECT DISTINCT contact_year,contract_id,plan_id,segment_id,category_description,regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(benefit,'\&nbsp\;',''),'<b>',''),'</b>',''),'<ul>',''),'</ul>',''),'<li>',''),'</li>',''),'<br />',''),'<p>',''),'</p>',''),'<ul style="list-style-type:disc">','') FROM planservice_2 WHERE category_code in (8,16);
+
+--FINAL ANALYSIT SCRIPT--
+1.	Identify top 5 plans with lowest premiums for a given county across the  US for a specific county
+SELECT DISTINCT pli.CountyFIPSCode, pm.contact_Year,pm.contract_id,pm.plan_id,pm.segment_id,pm.premium
+FROM PlanInfoCounty_PK as pli 
+join premium_pk_f as pm on pli.contract_Year=pm.contact_Year AND pli.contract_id=pm.contract_id AND pli.plan_ID=pm.plan_ID AND pli.segment_id=pm.segment_id  
+WHERE pli.CountyFIPSCode = '12089' 
+order by premium asc;
+
+2.	To find plans that have highest co-pays for doctors in a given county for a specific county
+2.1.1  1.1.1	Find plans with highest copay where  payment_type = copay for a specific county
+SELECT DISTINCT pli.CountyFIPSCode, pli.contract_Year,pli.contract_id,pli.plan_id,pli.segment_id,cp.payment_type,cp.physician_type,cp.physician_in_out,cp.copay_amount
+FROM PlanInfoCounty_PK as pli 
+join copay_pk_f as cp on pli.contract_Year=cp.contact_Year AND pli.contract_id=cp.contract_id AND pli.plan_ID=cp.plan_ID AND pli.segment_id=cp.segment_id  
+WHERE pli.CountyFIPSCode = '12089' AND cp.payment_type = 'copay'
+order by cp.copay_amount DESC;
+
+2.1.2 Plan with highest copay for primary doctors for a specific county
+SELECT DISTINCT pli.CountyFIPSCode, pli.contract_Year,pli.contract_id,pli.plan_id,pli.segment_id,cp.payment_type,cp.physician_type,cp.physician_in_out,cp.copay_amount
+FROM PlanInfoCounty_PK as pli 
+join copay_pk_f as cp on pli.contract_Year=cp.contact_Year AND pli.contract_id=cp.contract_id AND pli.plan_ID=cp.plan_ID AND pli.segment_id=cp.segment_id  
+WHERE pli.CountyFIPSCode = '12089' AND cp.payment_type = 'copay' AND cp.physician_type = 'Primary'
+order by cp.copay_amount DESC;
+
+2.2.1 Find plans with highest co_insurance for a specific county 
+SELECT DISTINCT pli.CountyFIPSCode, pli.contract_Year,pli.contract_id,pli.plan_id,pli.segment_id,cp.payment_type,cp.physician_type,cp.physician_in_out,cp.co_ins_amount
+FROM PlanInfoCounty_PK as pli 
+join copay_pk_f as cp on pli.contract_Year=cp.contact_Year AND pli.contract_id=cp.contract_id AND pli.plan_ID=cp.plan_ID AND pli.segment_id=cp.segment_id  
+WHERE pli.CountyFIPSCode = '12089' AND cp.payment_type = 'co_insurance'
+order by cp.co_ins_amount DESC;
+
+2.2.2 Find plan with highest co=insurance for primary doctors for a specific county
+SELECT DISTINCT pli.CountyFIPSCode, pli.contract_Year,pli.contract_id,pli.plan_id,pli.segment_id,cp.payment_type,cp.physician_type,cp.physician_in_out,cp.co_ins_amount
+FROM PlanInfoCounty_PK as pli 
+join copay_pk_f as cp on pli.contract_Year=cp.contact_Year AND pli.contract_id=cp.contract_id AND pli.plan_ID=cp.plan_ID AND pli.segment_id=cp.segment_id  
+WHERE pli.CountyFIPSCode = '12089' AND cp.payment_type = 'co_insurance' AND cp.physician_type = 'Primary'
+order by cp.co_ins_amount DESC;
+
+3.	To compare plans based on features like plans that offer free ambulance services
+SELECT DISTINCT pli.contract_Year,pli.contract_id,pli.plan_id,pli.segment_id,ams.co_insurance,ams.in_out_network,ams.ambulance_cost,ams.per_amount FROM PlanInfoCounty_PK as pli join ambulance_service_pk as ams on pli.contract_Year=ams.contact_Year AND pli.contract_id=ams.contract_id AND pli.plan_ID=ams.plan_ID AND pli.segment_id=ams.segment_id WHERE ams.ambulance_cost =0 AND ams.per_amount = 0;
+
+4.	To compare plans based on  features like the benefits available for diabetes under specific plan for a specific contract and Plan
+SELECT * FROM diabetes_service_pk where contract_id = 'H0108' and plan_id = '50';
+
+5.	To compare plan benefits on diabetes and mental healthcare offered by all companies in a particular county
+SELECT DISTINCT pli.CountyFIPSCode, dmb.contact_Year,dmb.contract_id,dmb.plan_id,dmb.segment_id,dmb.category_description,dmb.d_m_benefit
+FROM PlanInfoCounty_PK as pli 
+join d_m_benefit_pk as dmb on pli.contract_Year=dmb.contact_Year AND pli.contract_id=dmb.contract_id AND pli.plan_ID=dmb.plan_ID AND pli.segment_id=dmb.segment_id  
+WHERE pli.CountyFIPSCode = '12089' AND dmb.plan_id = '40';
+
+-- 

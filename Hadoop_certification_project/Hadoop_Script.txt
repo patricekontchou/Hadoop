@@ -1,0 +1,18 @@
+hadoop script
+
+--merge mapreduce result in one file 
+
+--merge the first file 
+hadoop fs -cat pat_hdfs/PlanInfoCounty1/part-m-* > patrice/result/PlanInfoCounty1.txt
+
+--merge the second file 
+hadoop fs -cat pat_hdfs/PlanInfoCounty2/part-m-* > patrice/result/PlanInfoCounty2.txt
+
+--merge both file using linux cat function
+cat patrice/result/* > patrice/PlanInfoCountyFinal.txt
+
+--move final file back in hdfs
+hadoop fs -put patrice/PlanInfoCountyFinal.txt pat_hdfs/result/PlanInfoCountyFinal.txt
+
+--copy planServices result from the ouput dir to result file using recursive mapreduce job
+hadoop distcp pat_hdfs/PlanServices/part-m-0000 pat_hdfs/PlanServices.txt
